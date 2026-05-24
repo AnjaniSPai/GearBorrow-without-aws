@@ -1657,5 +1657,5 @@ if __name__ == '__main__':
         host_env = '127.0.0.1'
         
     print(f"Starting GearBorrow App on host: {host_env}")
-    app.run(host=host_env, port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
     # app.run(debug=True, port=5000)
