@@ -1089,6 +1089,7 @@ from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
+
 # Automatically scans and loads configuration keys if a .env file exists (on AWS)
 load_dotenv()
 
@@ -1286,6 +1287,47 @@ def admin_ledger():
 #     flash(f"Return Processed for {receipt['username']}. Fine: ₹{fine}", "success")
 #     return redirect('/admin')
 
+@app.route('/admin/add_item', methods=['POST'])
+def add_item():
+    if session.get('role') != 'admin': 
+        return redirect('/')
+        
+    name = request.form.get('name')
+    price = int(request.form.get('price'))
+    emoji = request.form.get('emoji', '')
+    quantity = int(request.form.get('quantity', 1))
+
+    image_file = request.files.get('image')
+    image_path = ""
+    
+    # 🚀 Safely handles both environments (S3 on AWS / Local folder on Laptop)
+    if image_file and image_file.filename != '':
+        image_path = upload_file_safely(image_file)
+
+    inventory_col.insert_one({
+        "_id": str(random.randint(100, 99999)), 
+        "name": name, 
+        "price_per_day": price,
+        "emoji": emoji,
+        "total_stock": quantity, 
+        "available_stock": quantity, 
+        "renters": [],
+        "image_url": image_path  # Match this key name with what your frontend HTML expects
+    })
+    
+    return redirect('/')
+
+@app.route('/admin/delete_item/<item_id>', methods=['POST'])
+def delete_item(item_id):
+    if session.get('role') != 'admin':
+        return redirect('/')
+    
+    # Drops the item document out of your MongoDB database matching its unique ID string
+    inventory_col.delete_one({"_id": item_id})
+    
+    flash("Equipment decommissioned from the storage array successfully.", "success")
+    return redirect('/admin')
+
 @app.route('/return_item/<receipt_id>', methods=['GET', 'POST'])
 def process_return(receipt_id):
     if session.get('role') != 'admin': return redirect('/')
@@ -1374,6 +1416,12 @@ def rent_gadget(gadget_id):
     user_data = users_col.find_one({"username": session['user']})
     
     if item and item['available_stock'] >= qty:
+        # Fetch the user from MongoDB
+        user_data = users_col.find_one({"username": session['user']})
+        
+        # 🛡️ SAFETY GUARD: If user is missing from the database, use a default dictionary
+        if user_data is None:
+            user_data = {"phone": "N/A", "email": "N/A"}
         create_rental_receipt(session['user'], user_data.get('phone', 'N/A'), item, qty, days)
         return redirect('/') # Standard redirect after manual rent
     return redirect('/')
@@ -1536,6 +1584,69 @@ def update_profile():
     
     flash("Profile updated successfully!", "success")
     return redirect('/profile')
+
+@app.route('/admin/force_recall/<item_id>', methods=['POST'])
+def force_recall(item_id):
+    # Security check: Ensure only an logged in admin can trigger a recall
+    if session.get('role') != 'admin':
+        return redirect('/')
+
+    # 1. Reset the equipment stock counts and empty the active renters array
+    inventory_col.update_one(
+        {"_id": item_id},
+        {
+            "$set": {"available_stock": inventory_col.find_one({"_id": item_id})["total_stock"], "renters": []}
+        }
+    )
+
+    # 2. Automatically mark any active deployments for this item as returned in your ledger
+    item_data = inventory_col.find_one({"_id": item_id})
+    if item_data:
+        receipts_col.delete_many({"item_name": item_data["name"]})
+
+    flash(f"Force recall processed successfully. Storage allocation restored.", "success")
+    return redirect('/')
+
+@app.route('/admin/update_item/<item_id>', methods=['POST'])
+def update_item(item_id):
+    # Security check: Ensure only a logged-in admin can update records
+    if session.get('role') != 'admin':
+        return redirect('/')
+
+    name = request.form.get('name')
+    price = int(request.form.get('price'))
+    total_stock = int(request.form.get('quantity'))
+    emoji = request.form.get('emoji', '')
+
+    # Fetch current item state from MongoDB to balance available stock changes safely
+    current_item = inventory_col.find_one({"_id": item_id})
+    if not current_item:
+        flash("Equipment item not found in data grid.", "danger")
+        return redirect('/admin')
+
+    # Smart Stock Balancing Logic
+    stock_diff = total_stock - current_item.get('total_stock', 0)
+    new_available = max(0, current_item.get('available_stock', 0) + stock_diff)
+
+    update_fields = {
+        "name": name,
+        "price_per_day": price,
+        "total_stock": total_stock,
+        "available_stock": new_available,
+        "emoji": emoji
+    }
+
+    # Handle image update if a new file is uploaded
+    image_file = request.files.get('image')
+    if image_file and image_file.filename != '':
+        image_path = upload_file_safely(image_file)
+        update_fields["image_url"] = image_path
+
+    # Push structural adjustments straight to MongoDB
+    inventory_col.update_one({"_id": item_id}, {"$set": update_fields})
+    
+    flash(f"Configuration updates for '{name}' committed successfully.", "success")
+    return redirect('/admin')
 
 if __name__ == '__main__':
     # If running on AWS (where credentials exist), listen on 0.0.0.0 so the internet can access it.
